@@ -12,7 +12,6 @@ Text-Image CAPTCHA
   Simple verification via unique ID and token.
 
 Slider CAPTCHA
-
   Drag-and-drop puzzle challenge with dynamic shapes and random background images.
   Smooth image rendering using Java AWT and Graphics2D.
   Randomized positions and shapes for every request.
