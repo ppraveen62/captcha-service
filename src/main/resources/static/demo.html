@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width,initial-scale=1"/>
+    <title>Captcha Tester</title>
+    <style>
+        body { font-family: Inter, Arial, sans-serif; padding: 18px; background:#f6f7fb; color:#111; }
+        h1 { margin: 0 0 12px 0; }
+        .controls { display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; }
+        button { padding:8px 12px; border-radius:6px; border:1px solid #cbd5e1; background:white; cursor:pointer; }
+        .card { background:white; padding:12px; border-radius:8px; box-shadow:0 6px 18px rgba(20,20,60,0.06); max-width:900px; }
+        .area { margin-top:12px; }
+        .img-grid { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+        .img-grid img { width:120px; height:120px; object-fit:cover; border-radius:6px; border:3px solid transparent; cursor:pointer; }
+        .img-grid img.selected { border-color:#2563eb; box-shadow:0 4px 12px rgba(37,99,235,0.18); }
+        .small { font-size:13px; color:#444; }
+        .result { margin-top:10px; font-weight:600; }
+        .slider-wrap { position:relative; width:300px; height:150px; border-radius:8px; overflow:hidden; user-select:none; }
+        .slider-bg { width:100%; height:100%; display:block; }
+        .slider-piece { position:absolute; top:0; left:8px; cursor:grab; touch-action:none; z-index:10; border-radius:4px; box-shadow:0 6px 16px rgba(0,0,0,0.18); }
+        .input-row { margin-top:10px; display:flex; gap:8px; align-items:center; }
+        input[type="text"] { padding:8px; border-radius:6px; border:1px solid #cbd5e1; width:260px; }
+        .log { margin-top:12px; font-family:monospace; background:#0f172a; color:#e6eef8; padding:8px; border-radius:6px; font-size:12px; max-height:200px; overflow:auto; }
+    </style>
+</head>
+<body>
+<h1>Captcha Tester</h1>
+<div class="card">
+    <div class="controls">
+        <button data-type="text-image">Text Image</button>
+        <button data-type="math">Math</button>
+        <button data-type="image-grid">Image Grid</button>
+        <button data-type="slider">Slider</button>
+        <button data-type="audio">Audio</button>
+        <button id="clearLog">Clear Log</button>
+    </div>
+
+    <div id="challengeArea" class="area small">Click a type button to create a captcha.</div>
+
+    <div id="verifyArea" class="area"></div>
+    <div id="resultArea" class="result"></div>
+
+    <div class="log" id="log"></div>
+</div>
+
+<script>
+    const API_PREFIX = '/captcha'; // adjust if your API is mounted elsewhere
+
+    const logEl = document.getElementById('log');
+    function log(...args){ logEl.innerText += args.map(a=>typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ') + '\\n'; logEl.scrollTop = logEl.scrollHeight; }
+
+    let current = null; // { captchaId, type, payload }
+
+    document.querySelectorAll('[data-type]').forEach(btn=>{
+      btn.addEventListener('click', async ()=> {
+        const type = btn.getAttribute('data-type');
+        await create(type);
+      });
+    });
+
+    document.getElementById('clearLog').addEventListener('click', ()=> logEl.innerText = '');
+
+    async function create(type){
+      resetUI();
+      try {
+        const resp = await fetch(`${API_PREFIX}/new?type=${encodeURIComponent(type)}`);
+        if(!resp.ok) {
+          const err = await resp.json().catch(()=>({status:resp.statusText}));
+          log('create error', err);
+          showError('failed to create challenge: ' + (err.message || JSON.stringify(err)));
+          return;
+        }
+        const body = await resp.json();
+        current = body;
+        log('created', body);
+        renderChallenge(body);
+      } catch(e){
+        log('create exception', e);
+        showError('create exception: ' + e.message);
+      }
+    }
+
+    function resetUI(){
+      document.getElementById('challengeArea').innerHTML = '';
+      document.getElementById('verifyArea').innerHTML = '';
+      document.getElementById('resultArea').innerText = '';
+    }
+
+    function showError(msg){
+      document.getElementById('resultArea').innerText = 'Error: ' + msg;
+    }
+
+    function renderChallenge(ch){
+      const area = document.getElementById('challengeArea');
+      area.innerHTML = `<div class="small">Type: <b>${escapeHtml(ch.type)}</b> — ID: <span class="small">${escapeHtml(ch.captchaId)}</span></div>`;
+      const payload = ch.payload || {};
+      const vArea = document.getElementById('verifyArea');
+      vArea.innerHTML = '';
+
+      if (ch.type === 'text-image') {
+        const imgBase = payload.imageBase64;
+        const img = document.createElement('img');
+        img.src = 'data:image/png;base64,' + imgBase;
+        img.alt = 'captcha';
+        img.style.maxWidth = '320px';
+        area.appendChild(img);
+
+        vArea.appendChild(createAnswerInput('Type the characters you see', async (answer) => {
+          await verify(answer);
+        }));
+
+      } else if (ch.type === 'math') {
+        area.innerHTML += `<div style="margin-top:8px;font-size:20px">${escapeHtml(payload.question)}</div>`;
+        vArea.appendChild(createAnswerInput('Answer the math question', async (answer) => {
+          await verify(answer);
+        }));
+
+      } else if (ch.type === 'image-grid') {
+        area.innerHTML += `<div style="margin-top:8px">${escapeHtml(payload.instructions || '')}</div>`;
+        const grid = document.createElement('div'); grid.className = 'img-grid';
+        const tiles = payload.tiles || {};
+        // tiles may be an object: key->url
+        for (const key of Object.keys(tiles)) {
+          const url = tiles[key];
+          const img = document.createElement('img');
+          img.src = url;
+          img.dataset.key = key;
+          img.addEventListener('click', () => {
+            img.classList.toggle('selected');
+          });
+          grid.appendChild(img);
+        }
+        area.appendChild(grid);
+
+        const btn = document.createElement('button');
+        btn.innerText = 'Verify Selection';
+        btn.addEventListener('click', async () => {
+          const selected = Array.from(grid.querySelectorAll('img.selected')).map(i=>i.dataset.key).join(',');
+          await verify(selected);
+        });
+        vArea.appendChild(btn);
+
+      } else if (ch.type === 'slider') {
+        area.innerHTML += `<div style="margin-top:8px">${escapeHtml(payload.instructions || '')}</div>`;
+        const wrap = document.createElement('div');
+        wrap.className = 'slider-wrap';
+        wrap.style.width = '300px'; wrap.style.height = '150px';
+
+        const bg = document.createElement('img');
+        bg.className = 'slider-bg';
+        bg.src = 'data:image/png;base64,' + payload.bgImageBase64;
+        bg.style.width = '100%';
+        bg.style.height = '100%';
+        wrap.appendChild(bg);
+
+        const piece = document.createElement('img');
+        piece.className = 'slider-piece';
+        piece.src = 'data:image/png;base64,' + payload.pieceImageBase64;
+        piece.style.width = payload.pieceWidth + 'px';
+        piece.style.height = payload.pieceWidth + 'px';
+        piece.style.top = (payload.pieceY || 40) + 'px';
+        piece.style.left = '8px';
+        wrap.appendChild(piece);
+
+        area.appendChild(wrap);
+
+        enableDrag(piece, wrap);
+
+        // Verify button, sends x offset (rounded)
+        const vbtn = document.createElement('button');
+        vbtn.innerText = 'Verify slider position';
+        vbtn.addEventListener('click', async () => {
+          const rect = wrap.getBoundingClientRect();
+          const pRect = piece.getBoundingClientRect();
+          const x = Math.round(pRect.left - rect.left);
+          await verify(String(x));
+        });
+        vArea.appendChild(vbtn);
+
+      } else if (ch.type === 'audio') {
+        area.innerHTML += `<div style="margin-top:8px">${escapeHtml(payload.instructions || '')}</div>`;
+        const src = 'data:' + (payload.mimeType || 'audio/wav') + ';base64,' + payload.audioBase64;
+        const audio = document.createElement('audio');
+        audio.controls = true;
+        const source = document.createElement('source');
+        source.src = src;
+        source.type = payload.mimeType || 'audio/wav';
+        audio.appendChild(source);
+        area.appendChild(audio);
+
+        vArea.appendChild(createAnswerInput('Type the digits you hear', async (answer) => {
+          await verify(answer);
+        }));
+      } else {
+        area.innerHTML += '<div>Unknown type</div>';
+      }
+    }
+
+    /* helper: create answer input with callback(answer) */
+    function createAnswerInput(placeholder, cb) {
+      const div = document.createElement('div');
+      div.className = 'input-row';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = placeholder;
+      input.autocomplete = 'off';
+      const btn = document.createElement('button');
+      btn.innerText = 'Verify';
+      btn.addEventListener('click', ()=> cb(input.value));
+      div.appendChild(input);
+      div.appendChild(btn);
+      return div;
+    }
+
+    async function verify(answer) {
+      if (!current) { showError('No active challenge'); return; }
+      try {
+        const body = { captchaId: current.captchaId, answer };
+        log('verify request', body);
+        const resp = await fetch(`${API_PREFIX}/verify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const data = await resp.json();
+        log('verify response', data);
+        if (data && data.success) {
+          document.getElementById('resultArea').innerText = '✅ Verification success';
+        } else {
+          document.getElementById('resultArea').innerText = '❌ Verification failed';
+        }
+      } catch (e) {
+        log('verify error', e);
+        showError('verify exception: ' + e.message);
+      }
+    }
+
+    /* enable horizontal drag for piece within container */
+    function enableDrag(piece, wrap) {
+      let isDown = false, startX=0, startLeft=0;
+
+      const onDown = (e) => {
+        isDown = true;
+        piece.style.cursor = 'grabbing';
+        startX = (e.touches ? e.touches[0].clientX : e.clientX);
+        startLeft = parseFloat(piece.style.left || 0);
+        e.preventDefault();
+      };
+      const onMove = (e) => {
+        if (!isDown) return;
+        const clientX = (e.touches ? e.touches[0].clientX : e.clientX);
+        const dx = clientX - startX;
+        let newLeft = startLeft + dx;
+        const wrapRect = wrap.getBoundingClientRect();
+        const pieceRect = piece.getBoundingClientRect();
+        const maxLeft = wrapRect.width - pieceRect.width - 8; // 8px padding left
+        if (newLeft < 8) newLeft = 8;
+        if (newLeft > maxLeft) newLeft = maxLeft;
+        piece.style.left = newLeft + 'px';
+      };
+      const onUp = (e) => {
+        isDown = false;
+        piece.style.cursor = 'grab';
+      };
+
+      piece.addEventListener('mousedown', onDown);
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+
+      piece.addEventListener('touchstart', onDown, {passive:false});
+      document.addEventListener('touchmove', onMove, {passive:false});
+      document.addEventListener('touchend', onUp);
+    }
+
+    /* small helper to escape HTML */
+    function escapeHtml(s){ return String(s||'').replace(/[&<>"]/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
+
+</script>
+</body>
+</html>
